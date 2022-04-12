@@ -1,0 +1,237 @@
+library(tidyverse)
+library(lubridate)
+library(yardstick)
+library(tune)
+library(caret)
+library(dplyr)
+library(glmnet)
+library(tidyverse)
+library(ggthemes)
+library(parsnip)
+library(rsample)
+library(workflows)
+
+lcdf <- read.csv('D:/Stout/loans_full_schema.csv')
+
+#How many loans are fully-paid and charged-off?
+lcdf %>% group_by(loan_status) %>% tally()
+#Are there values for loan_status other than "Fully Paid' and "Charged Off"?  If so, remove them:
+lcdf <- lcdf %>% filter(loan_status == "Fully Paid" | loan_status == "Charged Off")
+
+#How does loan status vary by loan grade
+lcdf %>% group_by(loan_status, grade) %>% tally()
+#or, using table
+table(lcdf$loan_status, lcdf$grade)
+
+#How does number of loans, loan amount, interest rate vary by grade
+lcdf %>% group_by(grade) %>% tally()
+lcdf %>% group_by(grade) %>% summarise(sum(loan_amount))   #and/or what is the mean loan_amnt by grade?
+lcdf %>% group_by(grade) %>% summarise(mean(interest_rate))
+
+
+#Or plot these..
+ggplot(lcdf, aes( x = interest_rate)) + geom_histogram(bins = 30, binwidth = 1)
+ggplot(lcdf, aes( x = loan_amount)) + geom_histogram(bins = 30,aes(fill=grade))
+ggplot(lcdf, aes( x = loan_amount)) + geom_histogram(bins = 30) + facet_wrap(~loan_status)
+
+
+#Visualization 1
+lcdf %>% 
+  group_by(state) %>% 
+  mutate(mean_ir = mean(interest_rate)) %>% 
+  ggplot(aes(x= state, y= mean_ir)) +
+  geom_point()+
+  geom_text(aes(label=state), vjust= 1.5, size= 2)+
+  labs(y= "Mean Interest Rate")+
+  theme(axis.ticks.x = element_blank(),
+        axis.text.x = element_blank())
+
+
+#loan amount by category
+ggplot(lcdf, aes( x = loan_amount)) + geom_boxplot(aes(fill=grade))
+#do you notice any general pattern?
+
+
+
+#As discussed in the case, LendingClub assigns a grade to each loan, from A through G. How many loans are 
+#in each grade? What is the default rate in each grade? 
+#What is the average interest rate in each grade? What about the average percentage (annual) return? 
+#Do these numbers surprise you? If you had to invest in one grade only, which loans would you invest in?
+lcdf %>% group_by(grade) %>% summarise(nLoans=n(), defaults=sum(loan_status=="Charged Off"),
+                                       defaultRate=defaults/nLoans, avgInterest= mean(interest_rate), 
+                                       stdInterest=sd(interest_rate), avgLoanAMt=mean(loan_amount),
+                                       avgPmnt=mean(paid_total))
+
+
+#Visualization 2
+lcdf %>%
+  filter(annual_income > 10) %>%
+  ggplot(aes(x = annual_income, y = interest_rate)) +
+  geom_point(color = "darkblue") +
+  scale_x_log10() +
+  labs(x = "Annual Income (log adjusted)", y = "Interest Rate", title = "Interest Rate vs. Annual Income")
+
+
+lcdf %>%
+  ggplot(aes(x = interest_rate, color = homeownership)) +
+  geom_density() +
+  labs(x = "Interest Rate", y = "", title = "Distribution of Loan Interest Rates based on Home Ownership")
+
+
+
+#Linear Regression
+
+set.seed(1)
+
+# linear regression model spec
+data_spec <-
+  linear_reg() %>% 
+  set_engine(engine = 'lm') %>% 
+  set_mode('regression')
+
+# cross-validation folds
+lcdf_cv <- vfold_cv(lcdf, v = 10)
+
+
+# workflow
+model_work <- workflow() %>%
+  add_formula(interest_rate ~ annual_income + debt_to_income + delinq_2y) %>%
+  add_model(data_spec)
+
+# cross-validate with workflow
+model_cv <- fit_resamples(model_work, resamples = lcdf_cv, metrics = metric_set(rmse, rsq, mae))
+
+
+model_cv %>% collect_metrics()
+
+#Gams
+
+set.seed(1)
+
+# gam model spec
+gam_spec <- gen_additive_mod() %>%
+  set_engine(engine = 'mgcv') %>%
+  set_mode('regression') 
+
+# fitting gam model
+gam_mod <- fit(gam_spec, interest_rate ~ s(annual_income) + s(debt_to_income) + s(delinq_2y), data = lcdf)
+
+
+par(mfrow=c(2,2))
+gam_mod %>% pluck('fit') %>% 
+  mgcv::gam.check() 
+
+
+#Question 2
+
+# read in data
+
+# load packages
+library(tidyverse)
+library(ggthemes)
+theme_set(theme_minimal())
+orders<- read.csv("D:/Stout/casestudy.csv")
+
+year <- orders %>%
+  select(year) %>%
+  unique()
+output <- tibble(year)
+output$year <- as.integer(output$year)
+
+total_revenue <- orders %>%
+  group_by(year) %>%
+  mutate(total_revenue = sum(net_revenue)) %>%
+  select(total_revenue, year) %>%
+  unique()
+
+# add total revenue to output
+output <- output %>%
+  left_join(total_revenue, by = "year")
+
+# add boolean column new_customer to orders
+orders <- orders %>%
+  group_by(customer_email) %>%
+  mutate(new_customer = case_when(year == min(year) ~ TRUE, year > min(year) ~ FALSE))
+
+
+# add new customer revenue to output
+output <- output %>%
+  left_join(new_customer_revenue, by = "year")
+
+
+# compute existing customer growth and add to output
+output <- output %>%
+  arrange(year) %>%
+  mutate(existing_customer_growth = (total_revenue - new_customer_revenue) - (lag(total_revenue) - lag(new_customer_revenue)))
+
+
+# compute revenue lost from attrition and add to output
+output <- output %>%
+  arrange(year) %>%
+  mutate(revenue_lost_attrition = lag(total_revenue) - (total_revenue - new_customer_revenue))
+
+
+# compute existing customer revenue and add to output
+output <- output %>%
+  mutate(existing_customer_revenue = total_revenue - new_customer_revenue)
+
+# compute existing customer revenue prior year and add to ouput
+output <- output %>%
+  arrange(year) %>%
+  mutate(existing_customer_revenue_prior = lag(total_revenue) - lag(new_customer_revenue))
+
+
+# compute total customers and total customers prior
+total_customers <- orders %>%
+  group_by(year) %>%
+  mutate(total_customers = n()) %>%
+  select(total_customers, year) %>%
+  unique() %>%
+  ungroup() %>%
+  arrange(year) %>%
+  mutate(total_customers_prior = lag(total_customers))
+
+
+# add total customers and total customers prior to output
+output <- output %>%
+  left_join(total_customers, by = "year")
+
+
+# compute new customers
+new_customers <- orders %>%
+  filter(new_customer == TRUE) %>%
+  group_by(year) %>%
+  mutate(new_customers = n()) %>%
+  select(new_customers, year) %>%
+  unique()
+
+# add new customers to output
+output <- output %>%
+  left_join(new_customers, by = "year")
+
+
+# compute lost customers and add to output
+output <- output %>%
+  arrange(year) %>%
+  mutate(lost_customers = lag(total_customers) - (total_customers - new_customers))
+
+output
+
+output %>%
+  ggplot() +
+  geom_line(aes(x = year, y = new_customer_revenue/new_customers, color = "New")) +
+  geom_line(aes(x = year, y = (total_revenue - new_customer_revenue)/ (total_customers - new_customers), , color = "Existing")) +
+  labs(x = "Year", y = "Average Revenue per Customer", title = "Average Revenue for New and Existing Customers") +
+  scale_color_manual("", breaks = c("Existing", "New"), values = c("Existing" = "red", "New" = "blue"))
+
+output %>%
+  ggplot() +
+  geom_line(aes(x = year, y = new_customers, color = "New")) +
+  geom_line(aes(x = year, y = lost_customers, color = "Lost")) +
+  labs(x = "Year", y = "", title = "Number of Customers Gained and Lost per Year") +
+  scale_color_manual("", breaks = c("New", "Lost"), values = c("Lost" = "blue", "New" = "orange"))
+
+output %>%
+  ggplot() +
+  geom_area(aes(x = year, y = new_customers / total_customers), fill = "green", alpha = .5) +
+  labs(x = "Year", y = "", title = "Percent of New Customers by Year")
